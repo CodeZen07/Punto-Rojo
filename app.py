@@ -8,130 +8,109 @@ from folium.plugins import MarkerCluster
 st.set_page_config(page_title="PuntoRojo - Gestión de Totalizadores", layout="wide")
 
 st.title("🔴 PuntoRojo: Inteligencia de Pérdidas")
-st.markdown("### Distrito Nacional & Zona Este")
 
-# --- FUNCIÓN DE CARGA ROBUSTA ---
+# --- FUNCIÓN DE ESCANEO FLEXIBLE ---
+def find_column(df, variants):
+    """Busca una columna entre varias variantes posibles."""
+    cols = [c.strip().upper() for c in df.columns]
+    for variant in variants:
+        v_up = variant.upper()
+        if v_up in cols:
+            # Retorna el nombre original de la columna en el DF
+            idx = cols.index(v_up)
+            return df.columns[idx]
+    return None
+
 def load_data(files):
     data_dict = {}
     for file in files:
         name = file.name.lower()
-        # Leer el archivo
-        df = pd.read_csv(file)
+        # El archivo 'Balance CT' suele tener basura en las primeras filas
+        if "balance_ct" in name or "balance ct" in name:
+            df = pd.read_csv(file, skiprows=2) # Saltamos los encabezados de adorno
+        else:
+            df = pd.read_csv(file)
         
-        # NORMALIZACIÓN DE COLUMNAS: Quitar espacios, puntos y pasar a MAYÚSCULAS
-        df.columns = [str(col).strip().upper().replace(" ", "_") for col in df.columns]
-        
-        if "balance_ct" in name or "lectura" in name:
-            data_dict['balance'] = df
-        elif "bdg" in name:
-            data_dict['bdg'] = df
-        elif "relación" in name or "relacion" in name:
-            data_dict['relacion'] = df
+        # Normalización básica para identificación de archivo
+        if "bdg" in name: data_dict['bdg'] = df
+        elif "relación" in name or "relacion" in name: data_dict['relacion'] = df
+        elif "balance" in name or "lectura" in name: data_dict['balance'] = df
             
     return data_dict
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("Configuración de Datos")
-    uploaded_files = st.file_uploader(
-        "Sube los archivos CSV (Balance, BDG, Relación)", 
-        type=['csv'], 
-        accept_multiple_files=True
-    )
-    st.info("💡 Consejo: Asegúrate de que el archivo de pérdidas contenga la columna 'TOTALIZADOR' y 'PERDIDA_PORC'.")
+    st.header("Carga de Datos")
+    uploaded_files = st.file_uploader("Sube tus CSV", type=['csv'], accept_multiple_files=True)
 
 if uploaded_files:
     dfs = load_data(uploaded_files)
     
-    # 1. VALIDACIÓN DE ARCHIVOS CRÍTICOS
     if 'balance' in dfs and 'bdg' in dfs:
         balance = dfs['balance']
         bdg = dfs['bdg']
         
-        # Columnas clave normalizadas
-        ID_COL = 'TOTALIZADOR'
-        PERDIDA_COL = 'PERDIDA_PORC'
+        # BUSCAR COLUMNAS REALES (Evita el error de ID_TRAFO)
+        id_col_bal = find_column(balance, ['TOTALIZADOR', 'MEDIDOR', 'NIS', 'ID'])
+        id_col_bdg = find_column(bdg, ['TOTALIZADOR', 'CONTADOR', 'MEDIDOR', 'NIC'])
+        perdida_col = find_column(balance, ['%PÉRDIDA', '%PERDIDA', 'PERDIDA_PORC', '%', 'PÉRDIDAS'])
         
-        if ID_COL in balance.columns and ID_COL in bdg.columns:
-            # 2. CRUCE DE DATOS (Merge)
-            # Traemos coordenadas y datos técnicos de la BDG
-            cols_bdg = [c for c in [ID_COL, 'LATITUD', 'LONGITUD', 'CAPACIDAD_KVA', 'DIRECCION'] if c in bdg.columns]
+        if id_col_bal and id_col_bdg:
+            # Preparar BDG para el cruce
+            cols_geo = [id_col_bdg, 'LATITUD', 'LONGITUD', 'DIRECCION', 'SECTOR']
+            existentes_geo = [c for c in cols_geo if c in bdg.columns]
             
-            main_df = pd.merge(balance, bdg[cols_bdg], on=ID_COL, how='left')
+            # Unir datos
+            main_df = pd.merge(
+                balance, 
+                bdg[existentes_geo], 
+                left_on=id_col_bal, 
+                right_on=id_col_bdg, 
+                how='left'
+            )
 
-            # Convertir pérdida a número por seguridad
-            if PERDIDA_COL in main_df.columns:
-                main_df[PERDIDA_COL] = pd.to_numeric(main_df[PERDIDA_COL], errors='coerce').fillna(0)
+            # Limpiar datos de pérdida
+            if perdida_col:
+                main_df['VALOR_PERDIDA'] = pd.to_numeric(main_df[perdida_col], errors='coerce').fillna(0)
+                main_df = main_df.sort_values(by='VALOR_PERDIDA', ascending=False)
             
-            # Ordenar por pérdida para el TOP 10
-            main_df = main_df.sort_values(by=PERDIDA_COL, ascending=False)
-
-            # --- VISTA: TOP 10 Y MAPA ---
-            st.subheader("⚠️ Análisis de Puntos Críticos")
-            col_tabla, col_mapa = st.columns([1, 1.5])
+            # --- INTERFAZ ---
+            st.subheader("⚠️ Análisis Operativo")
+            col_t, col_m = st.columns([1, 1.5])
             
-            with col_tabla:
-                st.write("**Top 10 Mayores Pérdidas**")
-                # Mostramos columnas que existen en tus archivos
-                cols_mostrar = [c for c in [ID_COL, 'CIRCUITO', PERDIDA_COL] if c in main_df.columns]
-                st.dataframe(main_df[cols_mostrar].head(10), use_container_width=True, hide_index=True)
+            with col_t:
+                st.write("**Ranking de Pérdidas**")
+                display_cols = [c for c in [id_col_bal, 'CIRCUITO', perdida_col] if c in main_df.columns]
+                st.dataframe(main_df[display_cols].head(10), use_container_width=True, hide_index=True)
 
-            with col_mapa:
-                # Mapa centrado en Santo Domingo (Distrito Nacional)
-                m = folium.Map(location=[18.475, -69.93], zoom_start=12, tiles="cartodbpositron")
-                marker_cluster = MarkerCluster().add_to(m)
+            with col_m:
+                m = folium.Map(location=[18.47, -69.93], zoom_start=12, tiles="cartodbpositron")
+                cluster = MarkerCluster().add_to(m)
                 
-                # Filtrar los que tienen coordenadas
-                geo_df = main_df.dropna(subset=['LATITUD', 'LONGITUD'])
-                
-                for _, row in geo_df.iterrows():
-                    # Color del punto según la gravedad
-                    val_p = row[PERDIDA_COL]
-                    p_color = "red" if val_p > 40 else "orange" if val_p > 20 else "green"
-                    
-                    folium.CircleMarker(
-                        location=[row['LATITUD'], row['LONGITUD']],
-                        radius=7,
-                        color=p_color,
-                        fill=True,
-                        popup=f"Totalizador: {row[ID_COL]}<br>Pérdida: {val_p}%"
-                    ).add_to(marker_cluster)
-                
+                # Mapa
+                if 'LATITUD' in main_df.columns and 'LONGITUD' in main_df.columns:
+                    for _, row in main_df.dropna(subset=['LATITUD', 'LONGITUD']).iterrows():
+                        folium.CircleMarker(
+                            location=[row['LATITUD'], row['LONGITUD']],
+                            radius=6,
+                            color="red" if row.get('VALOR_PERDIDA', 0) > 30 else "green",
+                            fill=True,
+                            popup=f"ID: {row[id_col_bal]}"
+                        ).add_to(cluster)
                 st_folium(m, width="100%", height=400)
 
-            # --- BUSCADOR Y DETALLE DE SUMINISTROS ---
+            # --- BUSCADOR ---
             st.divider()
-            st.subheader("🔍 Buscador de Suministros Asociados")
+            selected = st.selectbox("Seleccionar Totalizador para ver Suministros:", [""] + list(main_df[id_col_bal].unique()))
             
-            selected_id = st.selectbox("Escribe o selecciona un ID de Totalizador:", [""] + list(main_df[ID_COL].unique()))
-            
-            if selected_id:
-                # Datos del totalizador seleccionado
-                info = main_df[main_df[ID_COL] == selected_id].iloc[0]
-                
-                met1, met2, met3 = st.columns(3)
-                met1.metric("Pérdida", f"{info[PERDIDA_COL]}%")
-                met2.metric("Circuito", info.get('CIRCUITO', 'N/A'))
-                met3.write(f"**Ubicación:** {info.get('DIRECCION', 'No disponible en BDG')}")
-                
-                # Buscar suministros en el archivo 'Relación'
-                if 'relacion' in dfs:
-                    rel = dfs['relacion']
-                    if ID_COL in rel.columns:
-                        hijos = rel[rel[ID_COL] == selected_id]
-                        st.write(f"### Suministros vinculados ({len(hijos)})")
-                        st.dataframe(hijos, use_container_width=True)
-                        
-                        # Insight de Naval Ravikant para la toma de decisiones
-                        if info[PERDIDA_COL] > 40:
-                            st.error(f"**Recomendación Atlas:** Con un {info[PERDIDA_COL]}% de pérdida, el apalancamiento está en la inspección técnica inmediata. No pierdas tiempo en análisis manuales; este punto es una anomalía clara.")
-                    else:
-                        st.warning(f"El archivo de Relación no tiene la columna '{ID_COL}'.")
-                else:
-                    st.info("Sube el archivo 'Relación' para ver los NICs de este totalizador.")
+            if selected and 'relacion' in dfs:
+                rel = dfs['relacion']
+                id_rel = find_column(rel, ['TOTALIZADOR', 'MEDIDOR', 'ID'])
+                if id_rel:
+                    hijos = rel[rel[id_rel].astype(str) == str(selected)]
+                    st.write(f"Suministros asociados al Totalizador {selected}:")
+                    st.dataframe(hijos, use_container_width=True)
         else:
-            st.error(f"Error: No se encontró la columna '{ID_COL}' en los archivos subidos.")
+            st.error("No se pudo vincular los archivos. Asegúrate de que ambos tengan una columna de 'Totalizador' o 'Medidor'.")
     else:
-        st.info("Esperando archivos... Asegúrate de subir el 'Balance' y la 'BDG'.")
-else:
-    st.write("Favor subir los archivos CSV en la barra lateral para procesar el balance.")
+        st.info("Sube los archivos para procesar.")
