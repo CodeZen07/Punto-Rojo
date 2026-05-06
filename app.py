@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import HeatMap, MarkerCluster
+from folium.plugins import MarkerCluster
 
 # Configuración de la página
 st.set_page_config(page_title="PuntoRojo - Gestión de Totalizadores", layout="wide")
@@ -10,120 +10,128 @@ st.set_page_config(page_title="PuntoRojo - Gestión de Totalizadores", layout="w
 st.title("🔴 PuntoRojo: Inteligencia de Pérdidas")
 st.markdown("### Distrito Nacional & Zona Este")
 
-# --- FUNCIÓN PARA CARGAR Y LIMPIAR NOMBRES DE COLUMNAS ---
+# --- FUNCIÓN DE CARGA ROBUSTA ---
 def load_data(files):
     data_dict = {}
     for file in files:
         name = file.name.lower()
-        # Leemos el CSV
+        # Leer el archivo
         df = pd.read_csv(file)
-        # Limpiamos los nombres de las columnas (quitamos espacios y pasamos a mayúsculas)
-        df.columns = [str(col).strip().upper() for col in df.columns]
         
-        if "balance ct" in name:
+        # NORMALIZACIÓN DE COLUMNAS: Quitar espacios, puntos y pasar a MAYÚSCULAS
+        df.columns = [str(col).strip().upper().replace(" ", "_") for col in df.columns]
+        
+        if "balance_ct" in name or "lectura" in name:
             data_dict['balance'] = df
         elif "bdg" in name:
             data_dict['bdg'] = df
         elif "relación" in name or "relacion" in name:
             data_dict['relacion'] = df
+            
     return data_dict
 
-# --- CARGA DE ARCHIVOS EN SIDEBAR ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Configuración de Datos")
     uploaded_files = st.file_uploader(
-        "Sube los archivos CSV", 
+        "Sube los archivos CSV (Balance, BDG, Relación)", 
         type=['csv'], 
         accept_multiple_files=True
     )
-    st.info("Asegúrate de subir: Balance CT, BDG y Relación.")
+    st.info("💡 Consejo: Asegúrate de que el archivo de pérdidas contenga la columna 'TOTALIZADOR' y 'PERDIDA_PORC'.")
 
 if uploaded_files:
     dfs = load_data(uploaded_files)
     
-    # Verificación de archivos clave
+    # 1. VALIDACIÓN DE ARCHIVOS CRÍTICOS
     if 'balance' in dfs and 'bdg' in dfs:
         balance = dfs['balance']
         bdg = dfs['bdg']
         
-        # --- LÓGICA DE UNIÓN DINÁMICA ---
-        # En tus archivos, la columna común es 'TOTALIZADOR'
-        col_union = 'TOTALIZADOR'
+        # Columnas clave normalizadas
+        ID_COL = 'TOTALIZADOR'
+        PERDIDA_COL = 'PERDIDA_PORC'
         
-        if col_union in balance.columns and col_union in bdg.columns:
-            # Seleccionamos solo las columnas necesarias de BDG para no saturar
-            columnas_bdg = [col_union, 'LATITUD', 'LONGITUD', 'CAPACIDAD_KVA', 'DIRECCION']
-            # Filtramos solo las que existan en el archivo de BDG
-            columnas_existentes = [c for c in columnas_bdg if c in bdg.columns]
+        if ID_COL in balance.columns and ID_COL in bdg.columns:
+            # 2. CRUCE DE DATOS (Merge)
+            # Traemos coordenadas y datos técnicos de la BDG
+            cols_bdg = [c for c in [ID_COL, 'LATITUD', 'LONGITUD', 'CAPACIDAD_KVA', 'DIRECCION'] if c in bdg.columns]
             
-            main_df = pd.merge(
-                balance, 
-                bdg[columnas_existentes], 
-                on=col_union, 
-                how='left'
-            )
+            main_df = pd.merge(balance, bdg[cols_bdg], on=ID_COL, how='left')
 
-            # Convertir pérdida a numérico por si viene como texto
-            if 'PERDIDA_PORC' in main_df.columns:
-                main_df['PERDIDA_PORC'] = pd.to_numeric(main_df['PERDIDA_PORC'], errors='coerce').fillna(0)
+            # Convertir pérdida a número por seguridad
+            if PERDIDA_COL in main_df.columns:
+                main_df[PERDIDA_COL] = pd.to_numeric(main_df[PERDIDA_COL], errors='coerce').fillna(0)
             
-            main_df = main_df.sort_values(by='PERDIDA_PORC', ascending=False)
+            # Ordenar por pérdida para el TOP 10
+            main_df = main_df.sort_values(by=PERDIDA_COL, ascending=False)
 
-            # --- VISUALIZACIÓN: TOP 10 ---
-            st.subheader("⚠️ Top 10 Totalizadores con Mayor Pérdida")
-            top_10 = main_df.head(10)
+            # --- VISTA: TOP 10 Y MAPA ---
+            st.subheader("⚠️ Análisis de Puntos Críticos")
+            col_tabla, col_mapa = st.columns([1, 1.5])
             
-            cols = st.columns([1.2, 2])
-            with cols[0]:
-                st.dataframe(
-                    top_10[[col_union, 'CIRCUITO', 'PERDIDA_PORC']], 
-                    use_container_width=True,
-                    hide_index=True
-                )
+            with col_tabla:
+                st.write("**Top 10 Mayores Pérdidas**")
+                # Mostramos columnas que existen en tus archivos
+                cols_mostrar = [c for c in [ID_COL, 'CIRCUITO', PERDIDA_COL] if c in main_df.columns]
+                st.dataframe(main_df[cols_mostrar].head(10), use_container_width=True, hide_index=True)
 
-            # --- VISUALIZACIÓN: MAPA ---
-            with cols[1]:
-                # Centrado en Distrito Nacional
-                m = folium.Map(location=[18.48, -69.93], zoom_start=12, tiles="cartodbpositron")
+            with col_mapa:
+                # Mapa centrado en Santo Domingo (Distrito Nacional)
+                m = folium.Map(location=[18.475, -69.93], zoom_start=12, tiles="cartodbpositron")
                 marker_cluster = MarkerCluster().add_to(m)
                 
-                # Solo graficamos los que tienen coordenadas
+                # Filtrar los que tienen coordenadas
                 geo_df = main_df.dropna(subset=['LATITUD', 'LONGITUD'])
                 
                 for _, row in geo_df.iterrows():
-                    p_color = "red" if row['PERDIDA_PORC'] > 40 else "orange" if row['PERDIDA_PORC'] > 20 else "green"
+                    # Color del punto según la gravedad
+                    val_p = row[PERDIDA_COL]
+                    p_color = "red" if val_p > 40 else "orange" if val_p > 20 else "green"
+                    
                     folium.CircleMarker(
                         location=[row['LATITUD'], row['LONGITUD']],
                         radius=7,
                         color=p_color,
                         fill=True,
-                        popup=f"ID: {row[col_union]}<br>Pérdida: {row['PERDIDA_PORC']}%"
+                        popup=f"Totalizador: {row[ID_COL]}<br>Pérdida: {val_p}%"
                     ).add_to(marker_cluster)
                 
                 st_folium(m, width="100%", height=400)
 
-            # --- BUSCADOR DE SUMINISTROS ---
+            # --- BUSCADOR Y DETALLE DE SUMINISTROS ---
             st.divider()
-            st.subheader("🔍 Detalle de Suministros Asociados")
+            st.subheader("🔍 Buscador de Suministros Asociados")
             
-            selected_id = st.selectbox("Busca un ID de Totalizador:", [""] + list(main_df[col_union].unique()))
+            selected_id = st.selectbox("Escribe o selecciona un ID de Totalizador:", [""] + list(main_df[ID_COL].unique()))
             
             if selected_id:
-                # Mostrar info del totalizador
-                info = main_df[main_df[col_union] == selected_id].iloc[0]
-                st.info(f"**Circuito:** {info.get('CIRCUITO', 'N/A')} | **Pérdida:** {info['PERDIDA_PORC']}%")
+                # Datos del totalizador seleccionado
+                info = main_df[main_df[ID_COL] == selected_id].iloc[0]
                 
+                met1, met2, met3 = st.columns(3)
+                met1.metric("Pérdida", f"{info[PERDIDA_COL]}%")
+                met2.metric("Circuito", info.get('CIRCUITO', 'N/A'))
+                met3.write(f"**Ubicación:** {info.get('DIRECCION', 'No disponible en BDG')}")
+                
+                # Buscar suministros en el archivo 'Relación'
                 if 'relacion' in dfs:
                     rel = dfs['relacion']
-                    # En 'relacion' la columna también es TOTALIZADOR
-                    asociados = rel[rel['TOTALIZADOR'] == selected_id]
-                    st.write(f"Suministros encontrados: {len(asociados)}")
-                    st.dataframe(asociados, use_container_width=True)
+                    if ID_COL in rel.columns:
+                        hijos = rel[rel[ID_COL] == selected_id]
+                        st.write(f"### Suministros vinculados ({len(hijos)})")
+                        st.dataframe(hijos, use_container_width=True)
+                        
+                        # Insight de Naval Ravikant para la toma de decisiones
+                        if info[PERDIDA_COL] > 40:
+                            st.error(f"**Recomendación Atlas:** Con un {info[PERDIDA_COL]}% de pérdida, el apalancamiento está en la inspección técnica inmediata. No pierdas tiempo en análisis manuales; este punto es una anomalía clara.")
+                    else:
+                        st.warning(f"El archivo de Relación no tiene la columna '{ID_COL}'.")
                 else:
-                    st.warning("Sube el archivo de 'Relación' para ver los suministros de este totalizador.")
+                    st.info("Sube el archivo 'Relación' para ver los NICs de este totalizador.")
         else:
-            st.error(f"No se encontró la columna '{col_union}' en los archivos. Verifica los encabezados.")
+            st.error(f"Error: No se encontró la columna '{ID_COL}' en los archivos subidos.")
     else:
-        st.info("Esperando archivos... Sube al menos 'Balance CT' y 'BDG'.")
+        st.info("Esperando archivos... Asegúrate de subir el 'Balance' y la 'BDG'.")
 else:
-    st.info("👋 Bienvenida/o. Sube los archivos en la barra lateral para comenzar el análisis.")
+    st.write("Favor subir los archivos CSV en la barra lateral para procesar el balance.")
