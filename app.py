@@ -1,479 +1,476 @@
 """
-PuntoRojo - Gestión de Pérdidas Eléctricas | Distrito Nacional
-Ingeniero de Datos: app reestructurada con limpieza dinámica de encabezados,
-fuzzy matching de columnas, semáforo visual y relación padre-hijo.
+Gestión de Pérdidas Eléctricas | Distrito Nacional
+Balance CT | Balance Central | Relación | BDG
 """
 
+import random
 import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-import numpy as np
-from difflib import get_close_matches
-import re
 
-# ──────────────────────────────────────────────
-# CONFIGURACIÓN DE PÁGINA
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# CONFIGURACIÓN
+# ─────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="PuntoRojo – Pérdidas Eléctricas",
     page_icon="🔴",
     layout="wide",
 )
 
-st.title("🔴 PuntoRojo — Gestión de Pérdidas Eléctricas | Distrito Nacional")
-st.caption("Sube el archivo Balance de Totalizadores para comenzar el análisis.")
 
-# ──────────────────────────────────────────────
-# HELPERS: FUZZY COLUMN FINDER
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# FUNCIONES DE CARGA
+# ─────────────────────────────────────────────────────────
 
-COLUMN_ALIASES = {
-    "TOTALIZADOR": ["totalizador", "talizador", "totalizadores", "id_trafo", "trafo", "transformador"],
-    "NIC":         ["nic", "n_ic", "num_nic"],
-    "NIS":         ["nis", "n_is", "num_nis"],
-    "NOMBRE":      ["nombre", "name", "cliente", "titular"],
-    "ESTADO":      ["estado", "situacion", "status", "estado_suministro"],
-    "COMPRA":      ["compra", "kwh_entregado", "kwh compra", "kwh_compra", "energia_compra"],
-    "FACTURACION": ["facturacion", "facturado", "kwh_facturado", "kwh facturado", "facturacion"],
-    "PERDIDA":     ["perdida", "pérdida", "diff", "diferencia"],
-    "PCT_PERDIDA": ["%perdida", "% perdida", "% pérdida", "%pérdida", "pct_perdida",
-                    "porcentaje_perdida", "perdida%", "%", "pctperdida", "%_perdida"],
-    "LATITUD":     ["latitud", "lat", "latitude", "y"],
-    "LONGITUD":    ["longitud", "lon", "lng", "longitude", "x"],
-    "CIRCUITO":    ["circuito", "circuit"],
-    "SECTOR":      ["sector", "barrio", "zona"],
-    "TIPO":        ["tipo", "type", "tipo_suministro"],
-}
-
-
-def _normalize(s: str) -> str:
-    """Quita tildes, espacios extra y convierte a minúsculas."""
-    s = str(s).lower().strip()
-    replacements = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n"}
-    for k, v in replacements.items():
-        s = s.replace(k, v)
-    s = re.sub(r"[^a-z0-9_%]", "", s)
-    return s
-
-
-def find_column(df: pd.DataFrame, canonical: str) -> str | None:
+def leer_balance_ct(xls):
     """
-    Busca la columna real en df que mejor coincide con el nombre canónico.
-    Retorna el nombre real de la columna o None.
+    Detecta la fila con 'ITEM' en Balance CT y lee la tabla de clientes.
+    Retorna (metadata_dict, dataframe_clientes).
     """
-    aliases = COLUMN_ALIASES.get(canonical, [canonical.lower()])
-    normalized_aliases = [_normalize(a) for a in aliases]
-    col_map = {_normalize(c): c for c in df.columns}
-
-    for alias in normalized_aliases:
-        if alias in col_map:
-            return col_map[alias]
-
-    # Fuzzy fallback
-    candidates = list(col_map.keys())
-    for alias in normalized_aliases:
-        matches = get_close_matches(alias, candidates, n=1, cutoff=0.75)
-        if matches:
-            return col_map[matches[0]]
-    return None
-
-
-def safe_col(df: pd.DataFrame, canonical: str, default=None):
-    """Retorna la Serie de la columna encontrada o una Serie de default."""
-    col = find_column(df, canonical)
-    if col:
-        return df[col]
-    if default is not None:
-        return pd.Series([default] * len(df), index=df.index)
-    return None
-
-
-# ──────────────────────────────────────────────
-# LIMPIEZA DINÁMICA DE ENCABEZADOS (Balance CT)
-# ──────────────────────────────────────────────
-
-def load_balance_ct(xls: pd.ExcelFile) -> pd.DataFrame | None:
-    """
-    Escanea la hoja 'Balance CT' fila por fila hasta encontrar 'ITEM' o 'TOTALIZADOR'
-    y usa esa fila como encabezado real.
-    """
-    try:
-        raw = pd.read_excel(xls, sheet_name="Balance CT", header=None, dtype=str)
-    except Exception:
-        return None
-
+    raw = pd.read_excel(xls, sheet_name="Balance CT", header=None, dtype=str)
+    meta = {}
     header_row = None
+
     for i, row in raw.iterrows():
-        row_upper = row.astype(str).str.upper().str.strip()
-        if row_upper.isin(["ITEM", "TOTALIZADOR"]).any():
+        vals = row.fillna("").astype(str).tolist()
+
+        # Extraer metadata de filas decorativas
+        for j, v in enumerate(vals):
+            v_up = v.strip().upper()
+            if ("TOTALIZADOR:" in v_up or "TALIZADOR:" in v_up) and "TOTALIZADOR" not in meta:
+                meta["TOTALIZADOR"] = vals[j + 2] if j + 2 < len(vals) else vals[j + 1] if j + 1 < len(vals) else ""
+            if "SECTOR:" in v_up and "SECTOR" not in meta:
+                meta["SECTOR"] = vals[j + 2] if j + 2 < len(vals) else ""
+            if v_up == "CIRCUITO" and "CIRCUITO" not in meta:
+                meta["CIRCUITO"] = vals[j + 1] if j + 1 < len(vals) else ""
+            if "DIRECCI" in v_up and ":" in v and "DIRECCION" not in meta:
+                meta["DIRECCION"] = vals[j + 2] if j + 2 < len(vals) else ""
+
+        # Detectar fila de encabezado real
+        if "ITEM" in [v.strip().upper() for v in vals]:
             header_row = i
             break
 
     if header_row is None:
-        return None
+        return meta, None
 
-    df = pd.read_excel(xls, sheet_name="Balance CT", header=header_row, dtype=str)
-    df.columns = [str(c).strip().upper() for c in df.columns]
-    # Eliminar filas donde la columna ITEM es NaN o no numérica
-    item_col = find_column(df, "NIC") or (df.columns[0] if len(df.columns) > 0 else None)
-    if item_col:
-        df = df[df[item_col].notna() & (df[item_col] != "NAN")]
+    df = pd.read_excel(xls, sheet_name="Balance CT", header=header_row)
+
+    # Renombrar columnas a nombres estándar
+    rename = {}
+    for col in df.columns:
+        c = str(col).strip().upper()
+        if c == "ITEM":                        rename[col] = "ITEM"
+        elif c == "NOMBRE":                    rename[col] = "NOMBRE"
+        elif c == "NIC":                       rename[col] = "NIC"
+        elif c == "NIS":                       rename[col] = "NIS"
+        elif c == "MEDIDOR":                   rename[col] = "MEDIDOR"
+        elif c == "MODULO":                    rename[col] = "MODULO"
+        elif c == "LECTURA 1":                 rename[col] = "LECTURA_1"
+        elif "LECTURA" in c and "2" in c:      rename[col] = "LECTURA_2"
+        elif c in ("DIF.", "DIF"):             rename[col] = "DIFERENCIA"
+        elif "CLIENTES" in c:                  rename[col] = "CLIENTES_BC"
+        elif "PROM" in c and "CONS" in c:      rename[col] = "PROM_CONSUMO"
+        elif "ULT" in c and "CF" in c:         rename[col] = "ULT_CF"
+    df = df.rename(columns=rename)
+
+    # Solo filas con ITEM numérico
+    df = df[pd.to_numeric(df.get("ITEM", pd.Series(dtype=str)), errors="coerce").notna()]
     df = df.reset_index(drop=True)
+    return meta, df
+
+
+def leer_balance_central(xls):
+    """
+    Hoja 'Balance Central' — columnas reales del archivo:
+    NIS, Totalizador, Medidor, Clientes, Compra, Facturación,
+    Pérdida, %Pérdida, Estado actual, Circuito, Sector, Dirección
+    """
+    if "Balance Central" not in xls.sheet_names:
+        return None
+    df = pd.read_excel(xls, sheet_name="Balance Central")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    rename = {}
+    for col in df.columns:
+        c = col.strip().upper().replace(" ", "_")
+        if c == "NIS":                         rename[col] = "NIS"
+        elif c == "TOTALIZADOR":               rename[col] = "TOTALIZADOR"
+        elif c == "MEDIDOR":                   rename[col] = "MEDIDOR"
+        elif c == "CLIENTES":                  rename[col] = "CLIENTES"
+        elif c == "COMPRA":                    rename[col] = "COMPRA_KWH"
+        elif "FACTUR" in c:                    rename[col] = "FACTURACION_KWH"
+        elif c in ("PÉRDIDA", "PERDIDA"):      rename[col] = "PERDIDA_KWH"
+        elif "%PÉRDIDA" in c or "%PERDIDA" in c: rename[col] = "PCT_PERDIDA"
+        elif "ESTADO_ACTUAL" in c:             rename[col] = "ESTADO"
+        elif c == "CIRCUITO":                  rename[col] = "CIRCUITO"
+        elif c == "SECTOR":                    rename[col] = "SECTOR"
+        elif "DIRECCI" in c:                   rename[col] = "DIRECCION"
+        elif c in ("TECNOLOGÍA", "TECNOLOGIA"): rename[col] = "TECNOLOGIA"
+        elif c == "KVA":                       rename[col] = "KVA"
+    df = df.rename(columns=rename)
+    df = df.dropna(how="all").reset_index(drop=True)
     return df
 
 
-def load_sheet_clean(xls: pd.ExcelFile, sheet_name: str) -> pd.DataFrame | None:
-    """Carga una hoja y normaliza columnas a MAYÚSCULAS."""
-    try:
-        df = pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
-        df.columns = [str(c).strip().upper() for c in df.columns]
-        df = df.dropna(how="all").reset_index(drop=True)
-        return df
-    except Exception:
+def leer_relacion(xls):
+    """
+    Hoja 'Relación' — columnas reales:
+    Medidor, Tipo, Totalizador, NIS, NIC, Consumo,
+    Compra, Facturación, Pérdidas, % Pérdidas, Circuito
+    """
+    if "Relación" not in xls.sheet_names:
         return None
+    df = pd.read_excel(xls, sheet_name="Relación")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    rename = {}
+    for col in df.columns:
+        c = col.strip().upper().replace(" ", "_").replace(".", "")
+        if c == "MEDIDOR":                     rename[col] = "MEDIDOR"
+        elif c == "TIPO":                      rename[col] = "TIPO"
+        elif c == "TOTALIZADOR":               rename[col] = "TOTALIZADOR"
+        elif c == "NIS":                       rename[col] = "NIS"
+        elif c == "NIC":                       rename[col] = "NIC"
+        elif c == "CONSUMO":                   rename[col] = "CONSUMO_KWH"
+        elif c == "COMPRA":                    rename[col] = "COMPRA_KWH"
+        elif "FACTUR" in c:                    rename[col] = "FACTURACION_KWH"
+        elif c in ("PÉRDIDAS", "PERDIDAS"):    rename[col] = "PERDIDAS_KWH"
+        elif "%" in c and "PERD" in c:         rename[col] = "PCT_PERDIDAS"
+        elif c == "CIRCUITO":                  rename[col] = "CIRCUITO"
+        elif "LUMINARIA" in c:                 rename[col] = "LUMINARIAS"
+    df = df.rename(columns=rename)
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
 
 
-# ──────────────────────────────────────────────
-# SEMÁFORO: color por % pérdida
-# ──────────────────────────────────────────────
-
-def traffic_light_color(pct: float) -> str:
-    if pct > 30:
-        return "red"
-    elif pct >= 15:
-        return "orange"
-    else:
-        return "green"
+def leer_bdg(xls):
+    """Hoja BDG — sin coordenadas GPS en este archivo."""
+    bdg_sheet = next((s for s in xls.sheet_names if "bdg" in s.lower()), None)
+    if not bdg_sheet:
+        return None
+    df = pd.read_excel(xls, sheet_name=bdg_sheet)
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
 
 
-def traffic_light_label(pct: float) -> str:
-    if pct > 30:
-        return "🔴 Alta (>30%)"
-    elif pct >= 15:
-        return "🟠 Media (15–30%)"
-    else:
-        return "🟢 Baja (<15%)"
+# ─────────────────────────────────────────────────────────
+# SEMÁFORO
+# ─────────────────────────────────────────────────────────
+
+def semaforo_color(pct):
+    pct = abs(pct)
+    if pct > 30:    return "red"
+    elif pct >= 15: return "orange"
+    else:           return "green"
+
+def semaforo_emoji(pct):
+    pct = abs(pct)
+    if pct > 30:    return "🔴 Alta (>30%)"
+    elif pct >= 15: return "🟠 Media (15-30%)"
+    else:           return "🟢 Baja (<15%)"
 
 
-# ──────────────────────────────────────────────
-# CARGA DE ARCHIVO
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# UI — CABECERA Y CARGA
+# ─────────────────────────────────────────────────────────
 
-uploaded_file = st.file_uploader(
+st.title("🔴 PuntoRojo — Pérdidas Eléctricas | Distrito Nacional")
+
+uploaded = st.file_uploader(
     "📂 Sube el archivo Excel (Balance de Totalizadores)",
     type=["xlsx"],
 )
 
-if not uploaded_file:
-    st.info("⬆️ Sube el archivo Excel para comenzar. El sistema detectará automáticamente los encabezados.")
+if not uploaded:
+    st.info("Sube el archivo Excel para comenzar.")
     st.stop()
 
-xls = pd.ExcelFile(uploaded_file)
-available_sheets = xls.sheet_names
+xls = pd.ExcelFile(uploaded)
 
-st.success(f"Archivo cargado. Pestañas encontradas: `{'`, `'.join(available_sheets)}`")
+with st.spinner("Procesando hojas del archivo..."):
+    meta_ct, df_ct = leer_balance_ct(xls)
+    df_bc          = leer_balance_central(xls)
+    df_rel         = leer_relacion(xls)
+    df_bdg         = leer_bdg(xls)
 
-# ──────────────────────────────────────────────
-# CARGA DE PESTAÑAS
-# ──────────────────────────────────────────────
+# Resumen de carga
+partes = []
+if df_ct  is not None: partes.append(f"✅ Balance CT ({len(df_ct)} clientes)")
+if df_bc  is not None: partes.append(f"✅ Balance Central ({len(df_bc)} totalizadores)")
+if df_rel is not None: partes.append(f"✅ Relación ({len(df_rel)} registros)")
+if df_bdg is not None: partes.append(f"✅ BDG ({len(df_bdg):,} suministros)")
+st.success("  |  ".join(partes))
 
-df_balance_ct      = load_balance_ct(xls)
-df_balance_central = load_sheet_clean(xls, "Balance Central") if "Balance Central" in available_sheets else None
-df_relacion        = load_sheet_clean(xls, "Relación")        if "Relación" in available_sheets        else None
-df_bdg             = load_sheet_clean(xls, next((s for s in available_sheets if "bdg" in s.lower()), ""))
 
-# ──────────────────────────────────────────────
-# TABS PRINCIPALES
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📋 Balance CT",
     "📊 Top 10 Pérdidas",
-    "🗺️ Mapa Semáforo",
+    "🗺️ Mapa",
     "🔗 Relación Padre-Hijo",
-    "🔍 Explorador de Datos",
+    "🔍 BDG / Explorador",
 ])
 
+
 # ══════════════════════════════════════════════
-# TAB 1 – TOP 10 PÉRDIDAS
+# TAB 1 — BALANCE CT
 # ══════════════════════════════════════════════
 with tab1:
-    st.subheader("📊 Top 10 Totalizadores con Mayor % de Pérdida")
+    st.subheader("📋 Balance CT — Detalle del Totalizador")
 
-    # Preferir Balance Central (tiene %Pérdida limpio)
-    df_top = df_balance_central if df_balance_central is not None else df_balance_ct
-
-    if df_top is None:
-        st.warning("No se encontró ninguna hoja de balance con datos.")
+    if df_ct is None:
+        st.error("No se pudo leer la hoja 'Balance CT'.")
     else:
-        pct_col  = find_column(df_top, "PCT_PERDIDA")
-        tот_col  = find_column(df_top, "TOTALIZADOR")
-        comp_col = find_column(df_top, "COMPRA")
-        fact_col = find_column(df_top, "FACTURACION")
-        perd_col = find_column(df_top, "PERDIDA")
-        circ_col = find_column(df_top, "CIRCUITO")
-        sect_col = find_column(df_top, "SECTOR")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Totalizador", meta_ct.get("TOTALIZADOR", "N/D"))
+        c2.metric("Sector",      meta_ct.get("SECTOR",      "N/D"))
+        c3.metric("Circuito",    meta_ct.get("CIRCUITO",    "N/D"))
+        c4.metric("Total Clientes", len(df_ct))
+        st.divider()
 
-        if pct_col is None:
-            st.error("No se encontró la columna de % Pérdida. Revisa el archivo.")
-        else:
-            df_top = df_top.copy()
-            df_top["_PCT"] = pd.to_numeric(df_top[pct_col], errors="coerce")
+        buscar = st.text_input("🔍 Buscar cliente por nombre o NIC")
+        df_show = df_ct.copy()
+        if buscar:
+            mask = df_show.apply(
+                lambda col: col.astype(str).str.contains(buscar, case=False, na=False)
+            ).any(axis=1)
+            df_show = df_show[mask]
 
-            cols_show = {}
-            if tот_col:  cols_show["Totalizador"] = tот_col
-            if sect_col: cols_show["Sector"]      = sect_col
-            if circ_col: cols_show["Circuito"]    = circ_col
-            if comp_col: cols_show["Compra (kWh)"]   = comp_col
-            if fact_col: cols_show["Facturación (kWh)"] = fact_col
-            if perd_col: cols_show["Pérdida (kWh)"]  = perd_col
-            cols_show["% Pérdida"] = pct_col
+        cols_ct = [c for c in ["ITEM","NOMBRE","NIC","NIS","MEDIDOR",
+                                "LECTURA_1","LECTURA_2","DIFERENCIA","CLIENTES_BC"]
+                   if c in df_show.columns]
+        st.dataframe(df_show[cols_ct], use_container_width=True, height=450)
 
-            ranking = (
-                df_top
-                .dropna(subset=["_PCT"])
-                .sort_values("_PCT", ascending=False)
-                .head(10)
-                .rename(columns={v: k for k, v in cols_show.items()})
-            )
+        if "DIFERENCIA" in df_ct.columns:
+            total = pd.to_numeric(df_ct["DIFERENCIA"], errors="coerce").sum()
+            st.metric("Suma total de diferencias (kWh)", f"{total:,.3f}")
 
-            display_cols = [c for c in cols_show.keys() if c in ranking.columns]
-            ranking["Semáforo"] = ranking["% Pérdida"].apply(
-                lambda x: traffic_light_label(float(x)) if pd.notna(x) else ""
-            )
-            display_cols.append("Semáforo")
+        csv = df_show.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Descargar como CSV", csv,
+                           file_name="balance_ct.csv", mime="text/csv")
 
-            st.dataframe(
-                ranking[display_cols].reset_index(drop=True),
-                use_container_width=True,
-                height=420,
-            )
-
-            # Mini chart
-            if tот_col:
-                chart_data = ranking[["Totalizador", "% Pérdida"]].copy()
-                chart_data["% Pérdida"] = pd.to_numeric(chart_data["% Pérdida"], errors="coerce")
-                st.bar_chart(chart_data.set_index("Totalizador"))
 
 # ══════════════════════════════════════════════
-# TAB 2 – MAPA SEMÁFORO
+# TAB 2 — TOP 10 PÉRDIDAS
 # ══════════════════════════════════════════════
 with tab2:
-    st.subheader("🗺️ Mapa de Semáforo de Pérdidas — Distrito Nacional")
-    st.caption("🔴 >30% pérdida | 🟠 15-30% | 🟢 <15%")
+    st.subheader("📊 Top 10 — Totalizadores con Mayor % de Pérdida")
 
-    if df_bdg is None:
-        st.warning("No se encontró la pestaña BDG. El mapa requiere coordenadas LATITUD/LONGITUD de esa pestaña.")
-    elif df_balance_central is None:
-        st.warning("No se encontró la hoja 'Balance Central' para cruzar % de pérdida.")
+    if df_bc is None:
+        st.error("No se encontró la hoja 'Balance Central'.")
+    elif "PCT_PERDIDA" not in df_bc.columns:
+        st.error(f"Columna '%%Pérdida' no encontrada. Columnas disponibles: {list(df_bc.columns)}")
     else:
-        lat_col  = find_column(df_bdg, "LATITUD")
-        lon_col  = find_column(df_bdg, "LONGITUD")
-        nis_col_bdg = find_column(df_bdg, "NIS")
+        df_work = df_bc.copy()
+        df_work["PCT_PERDIDA"] = pd.to_numeric(df_work["PCT_PERDIDA"], errors="coerce")
+        df_work["PCT_ABS"]     = df_work["PCT_PERDIDA"].abs()
 
-        if not lat_col or not lon_col:
-            st.warning(
-                f"No se encontraron columnas LATITUD/LONGITUD en la pestaña BDG. "
-                f"Columnas disponibles: {list(df_bdg.columns[:20])}"
-            )
-        else:
-            # Cruzar BDG con Balance Central por NIS
-            nis_col_bc  = find_column(df_balance_central, "NIS")
-            pct_col_bc  = find_column(df_balance_central, "PCT_PERDIDA")
-            tot_col_bc  = find_column(df_balance_central, "TOTALIZADOR")
-            nom_col_bdg = find_column(df_bdg, "NOMBRE")
+        # Filtro sector
+        if "SECTOR" in df_work.columns:
+            sectores   = ["Todos"] + sorted(df_work["SECTOR"].dropna().unique().tolist())
+            sector_sel = st.selectbox("Filtrar por Sector", sectores)
+            if sector_sel != "Todos":
+                df_work = df_work[df_work["SECTOR"] == sector_sel]
 
-            df_bdg_geo = df_bdg.copy()
-            df_bdg_geo["_LAT"] = pd.to_numeric(df_bdg_geo[lat_col], errors="coerce")
-            df_bdg_geo["_LON"] = pd.to_numeric(df_bdg_geo[lon_col], errors="coerce")
-            df_bdg_geo = df_bdg_geo.dropna(subset=["_LAT", "_LON"])
+        top10 = (df_work
+                 .dropna(subset=["PCT_PERDIDA"])
+                 .sort_values("PCT_ABS", ascending=False)
+                 .head(10)
+                 .reset_index(drop=True))
+        top10["Semáforo"] = top10["PCT_PERDIDA"].apply(semaforo_emoji)
 
-            if nis_col_bdg and nis_col_bc and pct_col_bc:
-                df_bc_slim = df_balance_central[[nis_col_bc, pct_col_bc] +
-                                                ([tot_col_bc] if tot_col_bc else [])].copy()
-                df_bc_slim[nis_col_bc] = df_bc_slim[nis_col_bc].astype(str).str.strip()
-                df_bdg_geo[nis_col_bdg] = df_bdg_geo[nis_col_bdg].astype(str).str.strip()
+        cols_top = [c for c in ["TOTALIZADOR","SECTOR","CIRCUITO","CLIENTES",
+                                 "COMPRA_KWH","FACTURACION_KWH","PERDIDA_KWH",
+                                 "PCT_PERDIDA","ESTADO","Semáforo"]
+                    if c in top10.columns]
+        st.dataframe(top10[cols_top], use_container_width=True, height=420)
 
-                df_map = df_bdg_geo.merge(
-                    df_bc_slim,
-                    left_on=nis_col_bdg,
-                    right_on=nis_col_bc,
-                    how="left",
-                )
-                df_map["_PCT"] = pd.to_numeric(df_map[pct_col_bc], errors="coerce").fillna(0)
-            else:
-                df_map = df_bdg_geo.copy()
-                df_map["_PCT"] = 0.0
+        if "TOTALIZADOR" in top10.columns:
+            chart = top10[["TOTALIZADOR","PCT_ABS"]].set_index("TOTALIZADOR")
+            chart.columns = ["% Pérdida (abs)"]
+            st.bar_chart(chart)
 
-            # Construir mapa Folium
-            m = folium.Map(location=[18.48, -69.93], zoom_start=13, tiles="CartoDB positron")
+        st.divider()
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Totalizadores",    len(df_bc))
+        k2.metric("Pérdida Promedio",       f"{df_work['PCT_PERDIDA'].mean():.2f}%")
+        k3.metric("Peor Pérdida",           f"{df_work['PCT_ABS'].max():.2f}%")
+        k4.metric("Totalizadores >30%",     int((df_work["PCT_ABS"] > 30).sum()))
 
-            plotted = 0
-            for _, row in df_map.iterrows():
-                lat, lon, pct = row["_LAT"], row["_LON"], row["_PCT"]
-                color = traffic_light_color(abs(pct))
-                label = traffic_light_label(abs(pct))
-                tot_name = row.get(tot_col_bc, row.get(nis_col_bdg, "N/D")) if tot_col_bc else "N/D"
-                nom = row[nom_col_bdg] if nom_col_bdg else ""
-
-                popup_html = f"""
-                <b>Totalizador:</b> {tot_name}<br>
-                <b>NIS:</b> {row.get(nis_col_bdg, '')}<br>
-                <b>Nombre:</b> {nom}<br>
-                <b>% Pérdida:</b> {pct:.1f}%<br>
-                <b>Estado:</b> {label}
-                """
-                folium.CircleMarker(
-                    location=[lat, lon],
-                    radius=8,
-                    color=color,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=0.8,
-                    popup=folium.Popup(popup_html, max_width=280),
-                    tooltip=f"{tot_name} | {pct:.1f}%",
-                ).add_to(m)
-                plotted += 1
-
-            st.info(f"Mostrando **{plotted}** puntos en el mapa.")
-            st_folium(m, width="100%", height=560)
 
 # ══════════════════════════════════════════════
-# TAB 3 – RELACIÓN PADRE-HIJO
+# TAB 3 — MAPA SEMÁFORO
 # ══════════════════════════════════════════════
 with tab3:
-    st.subheader("🔗 Relación Padre (Totalizador) → Hijo (Suministros / NICs)")
+    st.subheader("🗺️ Mapa de Semáforo — Distrito Nacional")
+    st.caption("🔴 >30%  |  🟠 15-30%  |  🟢 <15%  — Posición por circuito (el BDG no contiene coordenadas GPS)")
 
-    if df_relacion is None:
-        st.warning("No se encontró la pestaña 'Relación' en el archivo.")
+    # Coordenadas aproximadas por circuito del DN
+    CIRCUITO_COORDS = {
+        "TIM203":(18.4750,-69.9120), "TIM204":(18.4760,-69.9110),
+        "TIM205":(18.4770,-69.9130), "TIM201":(18.4720,-69.9200),
+        "TIM202":(18.4730,-69.9190), "CNP804":(18.4800,-69.9350),
+        "CNP803":(18.4810,-69.9340), "CNP802":(18.4820,-69.9360),
+        "CNP806":(18.4830,-69.9370), "CNP809":(18.4840,-69.9380),
+        "DESP01":(18.4700,-69.9050), "DESP02":(18.4710,-69.9040),
+        "DESP03":(18.4690,-69.9060), "DESP06":(18.4680,-69.9070),
+        "DESP08":(18.4670,-69.9080), "DESP09":(18.4660,-69.9090),
+        "CAPO04":(18.4900,-69.9150), "CAPO06":(18.4910,-69.9140),
+        "RCL076":(18.4650,-69.9400), "RCL080":(18.4640,-69.9410),
+        "VIME05":(18.5100,-69.9500), "VIME06":(18.5110,-69.9490),
+        "INVI03":(18.5200,-69.9600), "LM3805":(18.5300,-69.9700),
+        "LM3807":(18.5310,-69.9710), "LM3808":(18.5320,-69.9720),
+        "LM3802":(18.5330,-69.9730), "EBRI02":(18.4600,-69.9800),
+        "EBRI03":(18.4610,-69.9810), "EBRI12":(18.4620,-69.9820),
+    }
+
+    if df_bc is None:
+        st.warning("Se necesita la hoja 'Balance Central' para el mapa.")
     else:
-        tot_col_rel  = find_column(df_relacion, "TOTALIZADOR")
-        nic_col_rel  = find_column(df_relacion, "NIC")
-        nis_col_rel  = find_column(df_relacion, "NIS")
-        tipo_col_rel = find_column(df_relacion, "TIPO")
+        df_map = df_bc.copy()
+        df_map["PCT_PERDIDA"] = pd.to_numeric(df_map.get("PCT_PERDIDA"), errors="coerce").fillna(0)
+        df_map["PCT_ABS"]     = df_map["PCT_PERDIDA"].abs()
 
-        if not tot_col_rel:
-            st.error(
-                f"No se encontró la columna 'Totalizador' en la pestaña Relación. "
-                f"Columnas: {list(df_relacion.columns[:15])}"
-            )
-        else:
-            # Buscador de totalizadores
-            totalizadores = sorted(
-                df_relacion[tot_col_rel].dropna().astype(str).unique().tolist()
-            )
+        m = folium.Map(location=[18.48, -69.93], zoom_start=13, tiles="CartoDB positron")
 
-            search_text = st.text_input("🔍 Buscar Totalizador", placeholder="Escribe el nombre o código...")
-            if search_text:
-                totalizadores_filtrados = [t for t in totalizadores if search_text.upper() in t.upper()]
-            else:
-                totalizadores_filtrados = totalizadores
+        legend = """<div style="position:fixed;bottom:30px;left:30px;z-index:9999;
+            background:white;padding:12px;border-radius:8px;border:1px solid #ccc;font-size:13px;">
+            🔴 &gt;30% pérdida<br>🟠 15–30%<br>🟢 &lt;15%</div>"""
+        m.get_root().html.add_child(folium.Element(legend))
 
-            if not totalizadores_filtrados:
-                st.warning("Ningún totalizador coincide con la búsqueda.")
-            else:
-                selected = st.selectbox("Selecciona un Totalizador", totalizadores_filtrados)
+        plotted, sin_coord = 0, 0
+        for _, row in df_map.iterrows():
+            circ   = str(row.get("CIRCUITO", "")).strip().upper()
+            coords = CIRCUITO_COORDS.get(circ)
+            if not coords:
+                sin_coord += 1
+                continue
 
-                if selected:
-                    hijos = df_relacion[
-                        df_relacion[tot_col_rel].astype(str) == str(selected)
-                    ].copy()
+            pct  = row["PCT_ABS"]
+            lat  = coords[0] + random.uniform(-0.0015, 0.0015)
+            lon  = coords[1] + random.uniform(-0.0015, 0.0015)
 
-                    # Separar totalizador padre de clientes
-                    if tipo_col_rel:
-                        hijos_clientes = hijos[
-                            hijos[tipo_col_rel].str.upper().str.strip() == "CLIENTE"
-                        ]
-                        fila_padre = hijos[
-                            hijos[tipo_col_rel].str.upper().str.strip() == "TOTALIZADOR"
-                        ]
-                    else:
-                        hijos_clientes = hijos
-                        fila_padre = pd.DataFrame()
+            popup = f"""
+            <b>Totalizador:</b> {row.get('TOTALIZADOR','N/D')}<br>
+            <b>Circuito:</b> {circ}<br>
+            <b>Sector:</b> {row.get('SECTOR','')}<br>
+            <b>Compra:</b> {row.get('COMPRA_KWH','')} kWh<br>
+            <b>Facturación:</b> {row.get('FACTURACION_KWH','')} kWh<br>
+            <b>% Pérdida:</b> {row['PCT_PERDIDA']:.2f}%
+            """
+            folium.CircleMarker(
+                location=[lat, lon], radius=9,
+                color=semaforo_color(pct), fill=True,
+                fill_color=semaforo_color(pct), fill_opacity=0.85,
+                popup=folium.Popup(popup, max_width=300),
+                tooltip=f"{row.get('TOTALIZADOR','?')} | {row['PCT_PERDIDA']:.1f}%",
+            ).add_to(m)
+            plotted += 1
 
-                    st.markdown(f"### Totalizador: `{selected}`")
-                    col1, col2 = st.columns(2)
+        i1, i2 = st.columns(2)
+        i1.info(f"**{plotted}** totalizadores graficados")
+        if sin_coord:
+            i2.warning(f"**{sin_coord}** sin coordenadas de circuito")
 
-                    with col1:
-                        st.metric("Total suministros asociados", len(hijos_clientes))
+        st_folium(m, width="100%", height=580)
+        st.caption("💡 Para geolocalización exacta agrega columnas LATITUD y LONGITUD al archivo BDG.")
 
-                    with col2:
-                        compra_col_rel = find_column(df_relacion, "COMPRA")
-                        fact_col_rel   = find_column(df_relacion, "FACTURACION")
-                        if not fila_padre.empty and compra_col_rel:
-                            compra_val = pd.to_numeric(
-                                fila_padre[compra_col_rel].iloc[0], errors="coerce"
-                            )
-                            st.metric("Compra totalizador (kWh)", f"{compra_val:.2f}" if pd.notna(compra_val) else "N/D")
-
-                    # Tabla de hijos
-                    cols_hijo = {}
-                    if nic_col_rel:  cols_hijo["NIC"]    = nic_col_rel
-                    if nis_col_rel:  cols_hijo["NIS"]    = nis_col_rel
-                    if tipo_col_rel: cols_hijo["Tipo"]   = tipo_col_rel
-
-                    # Agregar columnas adicionales de consumo si existen
-                    for canon in ["COMPRA", "FACTURACION", "PERDIDA", "PCT_PERDIDA", "CIRCUITO"]:
-                        c = find_column(df_relacion, canon)
-                        if c and c not in cols_hijo.values():
-                            cols_hijo[canon.replace("_", " ").title()] = c
-
-                    rename_map = {v: k for k, v in cols_hijo.items()}
-                    display_df = hijos_clientes.rename(columns=rename_map)
-                    display_cols = [k for k in cols_hijo.keys() if k in display_df.columns]
-
-                    if display_cols:
-                        st.dataframe(display_df[display_cols].reset_index(drop=True),
-                                     use_container_width=True, height=400)
-                    else:
-                        st.dataframe(hijos_clientes.reset_index(drop=True),
-                                     use_container_width=True, height=400)
-
-                    # Download CSV
-                    csv = hijos_clientes.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        "⬇️ Descargar suministros como CSV",
-                        csv,
-                        file_name=f"suministros_{selected}.csv",
-                        mime="text/csv",
-                    )
 
 # ══════════════════════════════════════════════
-# TAB 4 – EXPLORADOR DE DATOS
+# TAB 4 — RELACIÓN PADRE-HIJO
 # ══════════════════════════════════════════════
 with tab4:
-    st.subheader("🔍 Explorador de Datos Crudos")
+    st.subheader("🔗 Relación Padre (Totalizador) → Hijos (Suministros / NICs)")
 
-    sheet_sel = st.selectbox("Selecciona una pestaña para explorar", available_sheets)
-    if sheet_sel:
-        df_exp = load_sheet_clean(xls, sheet_sel)
-        if df_exp is None and sheet_sel == "Balance CT":
-            df_exp = load_balance_ct(xls)
+    if df_rel is None:
+        st.error("No se encontró la hoja 'Relación'.")
+    elif "TOTALIZADOR" not in df_rel.columns:
+        st.error(f"No se encontró columna 'Totalizador'. Disponibles: {list(df_rel.columns)}")
+    else:
+        buscar_tot = st.text_input("🔍 Buscar Totalizador", placeholder="Código o nombre...")
+        tots = sorted(df_rel["TOTALIZADOR"].dropna().astype(str).unique().tolist())
+        tots_f = [t for t in tots if buscar_tot.upper() in t.upper()] if buscar_tot else tots
 
-        if df_exp is not None:
-            st.caption(f"Filas: {len(df_exp)} | Columnas: {len(df_exp.columns)}")
-
-            search_exp = st.text_input("Filtrar filas (buscar texto en cualquier columna)", key="exp_search")
-            if search_exp:
-                mask = df_exp.apply(
-                    lambda col: col.astype(str).str.contains(search_exp, case=False, na=False)
-                ).any(axis=1)
-                df_exp = df_exp[mask]
-
-            st.dataframe(df_exp, use_container_width=True, height=500)
-
-            csv_exp = df_exp.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                f"⬇️ Descargar '{sheet_sel}' como CSV",
-                csv_exp,
-                file_name=f"{sheet_sel.replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
+        if not tots_f:
+            st.warning("Sin coincidencias.")
         else:
-            st.error("No se pudo cargar la pestaña seleccionada.")
+            tot_sel = st.selectbox(f"Selecciona Totalizador ({len(tots_f)} encontrados)", tots_f)
+            registros = df_rel[df_rel["TOTALIZADOR"].astype(str) == str(tot_sel)]
 
-# ──────────────────────────────────────────────
-# FOOTER
-# ──────────────────────────────────────────────
+            if "TIPO" in registros.columns:
+                padre = registros[registros["TIPO"].str.strip().str.upper() == "TOTALIZADOR"]
+                hijos = registros[registros["TIPO"].str.strip().str.upper() == "CLIENTE"]
+            else:
+                padre, hijos = pd.DataFrame(), registros
+
+            st.markdown(f"### Totalizador: `{tot_sel}`")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Suministros", len(hijos))
+
+            if not padre.empty:
+                def get_num(df, col):
+                    return pd.to_numeric(df[col].iloc[0], errors="coerce") if col in df.columns else None
+                cp = get_num(padre, "COMPRA_KWH")
+                fp = get_num(padre, "FACTURACION_KWH")
+                pp = get_num(padre, "PERDIDAS_KWH")
+                if cp is not None: k2.metric("Compra (kWh)",       f"{cp:,.2f}")
+                if fp is not None: k3.metric("Facturación (kWh)",  f"{fp:,.2f}")
+                if pp is not None: k4.metric("Pérdida (kWh)",      f"{pp:,.2f}")
+
+            cols_h = [c for c in ["NIC","NIS","MEDIDOR","CONSUMO_KWH",
+                                   "LUMINARIAS","CIRCUITO"] if c in hijos.columns]
+            st.dataframe(hijos[cols_h].reset_index(drop=True),
+                         use_container_width=True, height=400)
+
+            csv_h = hijos.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Descargar como CSV", csv_h,
+                               file_name=f"suministros_{tot_sel}.csv", mime="text/csv")
+
+
+# ══════════════════════════════════════════════
+# TAB 5 — BDG / EXPLORADOR
+# ══════════════════════════════════════════════
+with tab5:
+    st.subheader("🔍 BDG — Base de Datos General / Explorador de Pestañas")
+
+    sheet_sel = st.selectbox("Selecciona pestaña", xls.sheet_names)
+    try:
+        if sheet_sel == "Balance CT":
+            df_exp = df_ct
+        elif sheet_sel == "Balance Central":
+            df_exp = df_bc
+        elif sheet_sel == "Relación":
+            df_exp = df_rel
+        else:
+            df_exp = pd.read_excel(xls, sheet_name=sheet_sel)
+    except Exception as e:
+        st.error(f"Error al leer: {e}")
+        df_exp = None
+
+    if df_exp is not None:
+        st.caption(f"Filas: {len(df_exp):,}  |  Columnas: {len(df_exp.columns)}")
+        filtro = st.text_input("🔍 Filtrar por texto", key="filtro_exp")
+        if filtro:
+            mask = df_exp.apply(
+                lambda col: col.astype(str).str.contains(filtro, case=False, na=False)
+            ).any(axis=1)
+            df_exp = df_exp[mask]
+            st.info(f"{len(df_exp):,} filas coinciden")
+
+        st.dataframe(df_exp, use_container_width=True, height=520)
+        st.download_button(
+            f"⬇️ Descargar '{sheet_sel}' como CSV",
+            df_exp.to_csv(index=False).encode("utf-8"),
+            file_name=f"{sheet_sel.replace(' ','_')}.csv",
+            mime="text/csv",
+        )
+
+# ─────────────────────────────────────────────────────────
 st.divider()
-st.caption("PuntoRojo v2.0 · Gestión de Pérdidas Eléctricas · Distrito Nacional · EDEESTE")
+st.caption("🔴 PuntoRojo v3.0  ·  Pérdidas Eléctricas  ·  Distrito Nacional")
