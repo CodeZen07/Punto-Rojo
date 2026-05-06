@@ -1,90 +1,127 @@
 import streamlit as st
 import pandas as pd
 import folium
-from folium.plugins import HeatMap
-import numpy as np
-
-# Función para generar datos de ejemplo
-def generate_sample_data():
-    infra_data = {
-        'ID_Trafo': [1, 2, 3],
-        'Sector': ['Gazcue', 'Ensanche Luperón', 'San Isidro'],
-        'Latitud': [18.4691, 18.4868, 18.4507],
-        'Longitud': [-69.9303, -69.9283, -69.9085],
-        'Capacidad_kVA': [100, 150, 200],
-        'kWh_Entregado': [2000, 2500, 3000]
-    }
-    
-    com_data = {
-        'ID_Trafo': [1, 2, 3],
-        'kWh_Facturado': [1000, 1200, 1500],
-        'Clientes_Directos': [50, 60, 70],
-        'Recaudacion_DOP': [50000, 70000, 90000]
-    }
-    
-    return pd.DataFrame(infra_data), pd.DataFrame(com_data)
+from streamlit_folium import st_folium
+from folium.plugins import HeatMap, MarkerCluster
 
 # Configuración de la página
-st.title("PuntoRojo - Detección de Pérdidas de Energía")
-st.write("Sube tus archivos para detectar y priorizar intervenciones por pérdida de energía.")
+st.set_page_config(page_title="PuntoRojo - Gestión de Totalizadores", layout="wide")
 
-# Carga de archivos
-uploaded_file = st.file_uploader("Sube un archivo Excel o CSV", type=['xlsx', 'csv'], accept_multiple_files=True)
+st.title("🔴 PuntoRojo: Inteligencia de Pérdidas - Fase de Prueba")
+st.markdown("### Distrito Nacional & Zona Este")
 
-if uploaded_file is not None:
-    # Cargar datos desde archivos
-    for file in uploaded_file:
-        if file.name.endswith('.csv'):
-            data = pd.read_csv(file)
-        elif file.name.endswith('.xlsx'):
-            data = pd.read_excel(file)
+# --- FUNCIONES DE PROCESAMIENTO ---
+def load_data(files):
+    data_dict = {}
+    for file in files:
+        # Identificar archivo por nombre (según los que me pasaste)
+        name = file.name.lower()
+        df = pd.read_csv(file)
+        
+        if "balance ct" in name:
+            data_dict['balance'] = df
+        elif "bdg" in name:
+            data_dict['bdg'] = df
+        elif "relación" in name or "relacion" in name:
+            data_dict['relacion'] = df
+    return data_dict
 
-        # Procesar los datos aquí
-        st.write(data.head())   # Muestra las primeras filas de los datos subidos
+# --- CARGA DE ARCHIVOS ---
+with st.sidebar:
+    st.header("Carga de Datos")
+    uploaded_files = st.file_uploader(
+        "Sube los archivos (Balance CT, BDG, Relación)", 
+        type=['csv'], 
+        accept_multiple_files=True
+    )
 
-# Generar datos de ejemplo si no hay archivos subidos
-if not uploaded_file:
-    infra_data, com_data = generate_sample_data()
-    st.write("Datos de ejemplo generados.")
-    st.write(infra_data)
-    st.write(com_data)
-
-# Procesar datos
-if uploaded_file:
-    # Aquí implementamos la lógica de cruce de datos
-    # Unir las tablas de infraestructura y comercial
-    merged_data = pd.merge(infra_data, com_data, on='ID_Trafo')
-    merged_data['Pérdida'] = merged_data['kWh_Entregado'] - merged_data['kWh_Facturado']
-    merged_data['Pérdida (%)'] = (merged_data['Pérdida'] / merged_data['kWh_Entregado']) * 100
+if uploaded_files:
+    dfs = load_data(uploaded_files)
     
-    # Filtrar zonas de intervención
-    zonas_intervencion = merged_data[(merged_data['Pérdida (%)'] > 45) | 
-                                      (merged_data['Pérdida'] > 500) | 
-                                      (merged_data['Clientes_Directos'] > 50)]
-    
-    # Mapa
-    st.subheader("Mapa de Pérdidas de Energía")
-    m = folium.Map(location=[18.4675, -69.9312], zoom_start=12)
-    
-    # HeatMap
-    heat_data = [[row['Latitud'], row['Longitud']] for index, row in merged_data.iterrows()]
-    HeatMap(heat_data).add_to(m)
-    
-    for _, row in merged_data.iterrows():
-        folium.Marker([row['Latitud'], row['Longitud']],
-                      popup=f"% Pérdida: {row['Pérdida (%)']:.2f}%, $ Perdido: {row['Pérdida']}, Clientes: {row['Clientes_Directos']}").add_to(m)
-    
-    st_folium(m, width=700, height=500)
+    # Verificar que tengamos los archivos mínimos para operar
+    if 'balance' in dfs and 'bdg' in dfs:
+        balance = dfs['balance']
+        bdg = dfs['bdg']
+        
+        # 1. CRUCE DE DATOS (Merge)
+        # Unimos el Balance con la BDG para obtener coordenadas y datos técnicos
+        # Usamos 'TOTALIZADOR' o el ID que vincule ambos
+        main_df = pd.merge(
+            balance, 
+            bdg[['TOTALIZADOR', 'LATITUD', 'LONGITUD', 'CAPACIDAD_KVA', 'DIRECCION']], 
+            on='TOTALIZADOR', 
+            how='left'
+        )
+        
+        # Limpieza rápida: Asegurar que las pérdidas sean numéricas
+        main_df['PERDIDA_PORC'] = pd.to_numeric(main_df['PERDIDA_PORC'], errors='coerce')
+        main_df = main_df.sort_values(by='PERDIDA_PORC', ascending=False)
 
-    # Sugerencias operativas
-    st.subheader("Sugerencias Operativas")
-    for _, row in zonas_intervencion.iterrows():
-        if row['Pérdida (%)'] > 45:
-            st.write(f"En {row['Sector']}, la pérdida es técnica por sobrecarga; se sugiere aumento de capacidad de transformador.")
-        else:
-            st.write(f"En {row['Sector']}, la pérdida es no técnica; se sugiere operativo de normalización nocturno y blindaje de red.")
+        # --- SECCIÓN: TOP 10 PÉRDIDAS ---
+        st.subheader("⚠️ Top 10 Totalizadores Críticos")
+        top_10 = main_df.head(10)
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.dataframe(
+                top_10[['TOTALIZADOR', 'CIRCUITO', 'PERDIDA_PORC', 'CONSUMO_TOTALIZADOR']],
+                use_container_width=True
+            )
 
-# Crear tabla de ruta crítica
-if not zonas_intervencion.empty:
-    st.subheader("Ruta Crítica")
-    st.write(zonas_intervencion[['Sector', 'ID_Trafo', 'Pérdida', 'Pérdida (%)']])
+        # --- SECCIÓN: MAPA INTERACTIVO ---
+        with col2:
+            st.write("Ubicación de Puntos Críticos")
+            # Centrado en Santo Domingo / Distrito Nacional
+            m = folium.Map(location=[18.47, -69.91], zoom_start=13, tiles="cartodbpositron")
+            
+            # Cluster para no saturar el mapa
+            marker_cluster = MarkerCluster().add_to(m)
+            
+            for _, row in main_df.dropna(subset=['LATITUD', 'LONGITUD']).iterrows():
+                # Color según severidad
+                color = "red" if row['PERDIDA_PORC'] > 40 else "orange" if row['PERDIDA_PORC'] > 20 else "green"
+                
+                folium.CircleMarker(
+                    location=[row['LATITUD'], row['LONGITUD']],
+                    radius=8,
+                    color=color,
+                    fill=True,
+                    fill_color=color,
+                    popup=f"Totalizador: {row['TOTALIZADOR']}<br>Pérdida: {row['PERDIDA_PORC']}%<br>Circuito: {row['CIRCUITO']}"
+                ).add_to(marker_cluster)
+            
+            st_folium(m, width=None, height=400)
+
+        # --- SECCIÓN: BÚSQUEDA Y SUMINISTROS ASOCIADOS ---
+        st.divider()
+        st.subheader("🔍 Buscador de Suministros por Totalizador")
+        
+        search_id = st.selectbox("Selecciona o busca un Totalizador:", [""] + list(main_df['TOTALIZADOR'].unique()))
+        
+        if search_id and 'relacion' in dfs:
+            rel = dfs['relacion']
+            # Filtrar suministros asociados
+            suministros = rel[rel['TOTALIZADOR'] == search_id]
+            
+            c1, c2, c3 = st.columns(3)
+            info_totalizador = main_df[main_df['TOTALIZADOR'] == search_id].iloc[0]
+            
+            c1.metric("Pérdida Actual", f"{info_totalizador['PERDIDA_PORC']}%")
+            c2.metric("Suministros Conectados", len(suministros))
+            c3.write(f"**Ubicación:** {info_totalizador['DIRECCION']}")
+            
+            st.write("### Suministros Asociados (NICs)")
+            st.table(suministros[['NIC', 'NOMBRE_CLIENTE', 'TARIFA', 'ESTADO']])
+            
+            # Insight Operativo
+            if info_totalizador['PERDIDA_PORC'] > 50:
+                st.error("💡 **Insight:** Este punto requiere blindaje de red inmediato. La pérdida supera el 50%, lo que sugiere fraude masivo o derivaciones directas.")
+            elif info_totalizador['PERDIDA_PORC'] > 25:
+                st.warning("💡 **Insight:** Se recomienda operativo de normalización nocturno para detectar anomalías no técnicas.")
+
+    else:
+        st.info("Por favor, sube los archivos de 'Balance CT', 'BDG' y 'Relación' para activar el análisis.")
+
+else:
+    st.warning("Esperando archivos CSV para iniciar el balance...")
